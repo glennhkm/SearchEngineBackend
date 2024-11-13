@@ -1,11 +1,11 @@
 import re
 import numpy as np
-from pymongo import MongoClient
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from sklearn.feature_extraction.text import TfidfVectorizer
 from Sastrawi.Stemmer.StemmerFactory import StemmerFactory
 from Sastrawi.StopWordRemover.StopWordRemoverFactory import StopWordRemoverFactory
+import json
 
 app = Flask(__name__)
 
@@ -17,50 +17,59 @@ CORS(app, resources={
     }
 })
 
-try:
-    client = MongoClient("mongodb://localhost:27017")
-    db = client["local"]
-    tf_idf_collection = db['tf_idf']
-    feature_collection = db['feature']
-    news_data_collection = db['news_data']
+with open('data/tf_idf.json', 'r') as file:
+    tfidf_data = json.load(file)
+
+with open('data/news_data.json', 'r') as file:
+    news_data = json.load(file)
     
-    tf_idf_documents = list(tf_idf_collection.aggregate([
-        {
-            "$lookup": {
-                "from": "news_data",
-                "localField": "Document_id",
-                "foreignField": "_id",
-                "as": "news_data"
-            }
-        },
-        { "$unwind": "$news_data" },
-        { "$project": { "news_data._id": 0, "news_data.Isi Berita": 0 } }
-    ]))
+with open('data/feature.json', 'r') as file:
+    feature_documents = json.load(file)
+
+news_data_dict = {str(item["_id"]["$oid"]): item for item in news_data}
+
+tf_idf_documents = []
+for tfidf_item in tfidf_data:
+    document_id = str(tfidf_item["Document_id"]["$oid"])
+    if document_id in news_data_dict:
+        news_item = news_data_dict[document_id]
+        
+        merged_item = {
+            "_id": tfidf_item["_id"],
+            "Document_id": tfidf_item["Document_id"],
+            "tfidf_vector": tfidf_item["tfidf_vector"],
+            "Judul": news_item["Judul"],
+            "Tanggal": news_item["Tanggal"],
+            "Pengarang": news_item["Pengarang"],
+            "Kategori": news_item["Kategori"],
+            "Url": news_item["Url"],
+            "Slug": news_item["Slug"],
+            "Ringkasan": news_item["Ringkasan"]
+        }
+        tf_idf_documents.append(merged_item)
+
+for i in range(2):
+    print(json.dumps(tf_idf_documents[i]))
     
-    feature_documents = list(feature_collection.find())
-    
-    if not tf_idf_documents or not feature_documents:
-        raise Exception("No documents found in collections")
-    
-    print(f"Loaded {len(tf_idf_documents)} TF-IDF documents")
-    print(f"Loaded {len(feature_documents)} feature documents")
-    
-    feature_names = feature_documents[0]['feature_names']
-    vectorizer = TfidfVectorizer(vocabulary=feature_names)
-    dummy_doc = ' '.join(feature_names)    
-    vectorizer.fit([dummy_doc])
-    
-    stemmer_factory = StemmerFactory()
-    stopword_factory = StopWordRemoverFactory()
-    stemmer = stemmer_factory.create_stemmer()
-    stopword_remover = stopword_factory.create_stop_word_remover()
-    
-    print("Application initialized successfully")
-    print(f"Vocabulary size: {len(feature_names)}")
-    
-except Exception as e:
-    print(f"Error during initialization: {str(e)}")
-    raise
+if not tf_idf_documents or not feature_documents:
+    raise Exception("No documents found in collections")
+
+print(f"Loaded {len(tf_idf_documents)} TF-IDF documents")
+print(f"Loaded {len(feature_documents)} feature documents")
+
+feature_names = feature_documents[0]['feature_names']
+vectorizer = TfidfVectorizer(vocabulary=feature_names)
+dummy_doc = ' '.join(feature_names)    
+vectorizer.fit([dummy_doc])
+
+stemmer_factory = StemmerFactory()
+stopword_factory = StopWordRemoverFactory()
+stemmer = stemmer_factory.create_stemmer()
+stopword_remover = stopword_factory.create_stop_word_remover()
+
+print("Application initialized successfully")
+print(f"Vocabulary size: {len(feature_names)}")
+
 
 def extract_slug(path):
     parts = path.strip('/').split('/')
@@ -84,12 +93,12 @@ def search():
             return jsonify({"error": "No query provided"}), 400
         
         query = data["query"]
-        category = data.get("category", "").title()
+        category = data.get("category", "").title()        
         
         print(f"Processing search query: {query} for category: {category}")
         
         if category != "All":
-            filtered_documents = [doc for doc in tf_idf_documents if doc.get('news_data', {}).get('Kategori') == category]
+            filtered_documents = [doc for doc in tf_idf_documents if doc.get('Kategori') == category]
         else:
             filtered_documents = tf_idf_documents
             
@@ -114,7 +123,7 @@ def search():
         results = []
         for idx in top_k_indices:
             if scores[idx] > 0:
-                news_data = filtered_documents[idx].get("news_data", {})
+                news_data = filtered_documents[idx]
                 results.append({
                     "title": news_data.get("Judul", "No title"),
                     "author": news_data.get("Pengarang", "No author"),
@@ -137,12 +146,11 @@ def search():
 def get(slug):  
     try:
         category, article_slug = extract_slug(slug)
-        news_data = news_data_collection.find_one({
-            "Slug": article_slug,
-            "Kategori": category.title()
-        })
+        for article in news_data:
+            if article.get("Slug") == article_slug and article.get("Kategori") == category.title():
+                return article 
         if news_data:
-            news_data['_id'] = str(news_data['_id'])
+            news_data['_id']['$oid'] = str(news_data['_id']['$oid'])
             return jsonify(news_data)
         else:
             return jsonify({"error": "No news data found for the given slug"}), 404
@@ -153,7 +161,7 @@ def get(slug):
 
 @app.route("/", methods=["GET"])
 def home():
-    return jsonify({
+    return jsonify({    
         "status": "API is running",
         "vocabulary_size": len(feature_names),
         "documents_count": len(tf_idf_documents),
